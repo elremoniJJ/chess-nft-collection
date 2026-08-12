@@ -1,0 +1,7 @@
+canisters:
+  - name: chess-nft-collection
+    build:
+      steps:
+        - type: script
+          commands:
+            - moc "icrc7/main.mo" $(mops sources) -o "$ICP_WASM_OUTPUT_PATH"

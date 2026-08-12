@@ -1,0 +1,23 @@
+{
+  "canisters": {
+    "chess-nft-collection": {
+      "main": "icrc7/main.mo",
+      "type": "motoko"
+    }
+  },
+  "dfx": "0.16.1",
+  "version": 1,
+  "networks": {
+    "ic": {
+      "providers": [
+        "https://ic0.app"
+      ],
+      "type": "persistent"
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": "mops sources"
+    }
+  }
+}
