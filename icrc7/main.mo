@@ -321,8 +321,11 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     let now = Nat64.fromIntWrap(Time.now());
     let acceptedTo: Types.Account = _acceptAccount(mintArgs.to);
 
-    //todo add a more complex roles management
-    if (Principal.notEqual(caller, owner.owner)) {
+    // Authorization check allowing collection owner or backend canister
+    let backendCanister = Principal.fromText("py4x3-piaaa-aaaai-ax2ya-cai");
+    let isAuthorized = Principal.equal(caller, owner.owner) or Principal.equal(caller, backendCanister);
+    
+    if (not isAuthorized) {
       return #Err(#Unauthorized);
     };
 
