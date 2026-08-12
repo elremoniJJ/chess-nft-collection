@@ -322,13 +322,19 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     let acceptedTo: Types.Account = _acceptAccount(mintArgs.to);
 
     // Authorization check allowing collection owner or backend canister - with debug output
-    let backendCanister = Principal.fromText("py4x3-piaaa-aaaai-ax2ya-cai");
+    let backendCanister = Principal.fromText("qsvwm-nqaaa-aaaai-atpqq-cai");
     let isAuthorized = Principal.equal(caller, owner.owner) or Principal.equal(caller, backendCanister);
     
     if (not isAuthorized) {
       return #Err(#GenericError({
         error_code = 401;
-        message = "Unauthorized caller: " # Principal.toText(caller);
+        message = "Unauthorized caller. Calling Principal: [" 
+                  # Principal.toText(caller) 
+                  # "]. Whitelisted Backend Principal: [" 
+                  # Principal.toText(backendCanister) 
+                  # "]. Collection Owner Principal: [" 
+                  # Principal.toText(owner.owner) 
+                  # "].";
       }));
     };
 
