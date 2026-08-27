@@ -55,6 +55,11 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   type Trie<K, V> = Trie.Trie<K, V>;
   type Key<K> = Trie.Key<K>;
 
+  public type BurnResult = {
+    #Ok : Types.TokenId;
+    #Err : Text;
+  };
+
   // we have to provide `put`, `get` and `remove` with
   // a record of type `Key<K> = { hash: Hash.Hash; key: K }`;
   // thus we define the following function that takes a value of type `K`
@@ -321,20 +326,22 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     let now = Nat64.fromIntWrap(Time.now());
     let acceptedTo: Types.Account = _acceptAccount(mintArgs.to);
 
-    // Authorization check allowing collection owner or backend canister - with debug output
+    // Authorization check allowing collection owner or backend canister
     let backendCanister = Principal.fromText("py4x3-piaaa-aaaai-ax2ya-cai");
     let isAuthorized = Principal.equal(caller, owner.owner) or Principal.equal(caller, backendCanister);
     
     if (not isAuthorized) {
+      let debugMsg = "Unauthorized caller. Calling Principal: [" 
+                   # Principal.toText(caller) 
+                   # "]. Whitelisted Backend Principal: [" 
+                   # Principal.toText(backendCanister) 
+                   # "]. Collection Owner Principal: [" 
+                   # Principal.toText(owner.owner) 
+                   # "].";
+
       return #Err(#GenericError({
         error_code = 401;
-        message = "Unauthorized caller. Calling Principal: [" 
-                  # Principal.toText(caller) 
-                  # "]. Whitelisted Backend Principal: [" 
-                  # Principal.toText(backendCanister) 
-                  # "]. Collection Owner Principal: [" 
-                  # Principal.toText(owner.owner) 
-                  # "].";
+        message = debugMsg;
       }));
     };
 
@@ -358,7 +365,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     };
 
     //create the new token
-    let newToken: Types.TokenMetadata = {
+    let newToken : Types.TokenMetadata = {
       tokenId = mintArgs.token_id;
       owner = acceptedTo;
       metadata = mintArgs.metadata;
@@ -377,6 +384,41 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     let transaction: Types.Transaction = _addTransaction(#mint, now, ?[mintArgs.token_id], ?acceptedTo, null, null, null, null, null);
 
     return #Ok(mintArgs.token_id);
+  };
+
+  public shared({ caller }) func burn(tokenId: Types.TokenId): async BurnResult {
+    let item = Trie.get(tokens, _keyFromTokenId tokenId, Nat.equal);
+
+    switch (item) {
+      case null {
+        return #Err("InvalidTokenId");
+      };
+      case (?tokenData) {
+        // Direct principal comparison—avoids record syntax parsing entirely
+        let isOwner = Principal.equal(caller, tokenData.owner.owner);
+
+        if (not isOwner) {
+          return #Err("Unauthorized: Only the token owner can burn this NFT");
+        };
+
+        // Remove token from global tokens Trie
+        tokens := Trie.remove(tokens, _keyFromTokenId tokenId, Nat.equal).0;
+
+        // Remove token from owner's list & decrement balance
+        _removeTokenFromOwners(tokenData.owner, tokenId);
+        _decrementBalance(tokenData.owner);
+
+        // Clear approvals for this token
+        _deleteAllTokenApprovals(tokenId);
+
+        // Decrement total supply
+        if (totalSupply > 0) {
+          totalSupply := totalSupply - 1;
+        };
+
+        return #Ok(tokenId);
+      };
+    };
   };
 
   public func get_transactions(getTransactionsArgs: Types.GetTransactionsArgs): async Types.GetTransactionsResult {
