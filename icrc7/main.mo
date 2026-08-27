@@ -1,6 +1,7 @@
 import Nat "mo:base/Nat";
 import Nat16 "mo:base/Nat16";
 import Nat64 "mo:base/Nat64";
+import Int16 "mo:base/Int16";
 import Blob "mo:base/Blob";
 import Bool "mo:base/Bool";
 import Principal "mo:base/Principal";
@@ -55,9 +56,76 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   type Trie<K, V> = Trie.Trie<K, V>;
   type Key<K> = Trie.Key<K>;
 
+ // ==========================================
+  // ICRC-7 & ICRC-21 Types
+  // ==========================================
   public type BurnResult = {
     #Ok : Types.TokenId;
     #Err : Text;
+  };
+
+  public type LineDisplayPage = {
+    lines : [Text];
+  };
+
+  public type LineDisplayMessagePayload = {
+    pages : [LineDisplayPage];
+  };
+
+  public type ConsentMessage = {
+    #LineDisplayMessage : LineDisplayMessagePayload;
+    #GenericDisplayMessage : Text;
+  };
+
+  public type ConsentInfoMetadata = {
+    language : Text;
+    utc_offset_minutes : ?Int16.Int16;
+  };
+
+  public type ConsentInfo = {
+    metadata : ConsentInfoMetadata;
+    consent_message : ConsentMessage;
+  };
+
+  public type DisplayMode = {
+    #GenericDisplayMessage;
+    #LineDisplayMessage;
+  };
+
+  public type UserPreferences = {
+    minimum_content : DisplayMode;
+    supported_languages : [Text];
+    utc_offset_minutes : ?Int16.Int16;
+  };
+
+  public type ConsentMessageArgs = {
+    method : Text;
+    arg : Blob;
+    user_preferences : UserPreferences;
+  };
+
+  public type UnsupportedCanisterCallPayload = {
+    description : Text;
+  };
+
+  public type ConsentMessageUnavailablePayload = {
+    description : Text;
+  };
+
+  public type GenericErrorPayload = {
+    error_code : Nat;
+    description : Text;
+  };
+
+  public type Icrc21Error = {
+    #UnsupportedCanisterCall : UnsupportedCanisterCallPayload;
+    #ConsentMessageUnavailable : ConsentMessageUnavailablePayload;
+    #GenericError : GenericErrorPayload;
+  };
+
+  public type Icrc21Result = {
+    #Ok : ConsentInfo;
+    #Err : Icrc21Error;
   };
 
   // we have to provide `put`, `get` and `remove` with
@@ -825,6 +893,37 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
 
   private func _incrementTransactionIndex() {
     transactionSequentialIndex := transactionSequentialIndex + 1;
+  };
+
+  // ==========================================
+  // ICRC-21 Consent Message Implementation
+  // ==========================================
+  public query func icrc21_canister_call_consent_message(args : ConsentMessageArgs) : async Icrc21Result {
+    switch (args.method) {
+      case ("burn") {
+        let response : ConsentInfo = {
+          metadata = {
+            language = "en";
+            utc_offset_minutes = null;
+          };
+          consent_message = #LineDisplayMessage({
+            pages = [{
+              lines = [
+                "Action: Burn Chess NFT",
+                "Warning: This will permanently destroy your NFT.",
+                "Canister: " # Principal.toText(Principal.fromActor(Self))
+              ];
+            }];
+          });
+        };
+        return #Ok(response);
+      };
+      case (_) {
+        return #Err(#UnsupportedCanisterCall({
+          description = "No consent message provided for method: " # args.method;
+        }));
+      };
+    };
   };
 
 };
