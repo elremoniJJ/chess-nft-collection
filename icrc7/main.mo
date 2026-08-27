@@ -64,6 +64,15 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     #Err : Text;
   };
 
+  public type Icrc21ConsentInfo = {
+    metadata : ConsentInfoMetadata;
+    consent_message : ConsentMessage;
+  };
+
+  public type Icrc21SupportedInfo = {
+    supported_display_modes : [DisplayMode];
+  };
+
   public type LineDisplayPage = {
     lines : [Text];
   };
@@ -898,10 +907,14 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   // ==========================================
   // ICRC-21 Consent Message Implementation
   // ==========================================
+
+  // 1. Primary Consent Message Endpoint
   public query func icrc21_canister_call_consent_message(args : ConsentMessageArgs) : async Icrc21Result {
+    let langs = args.user_preferences.supported_languages;
+    let lang = if (Array.size(langs) > 0) { langs[0] } else { "en" };
+
     switch (args.method) {
-      case ("burn") {
-        // Fallback to line display or generic display if minimum_content is null/unspecified
+      case ("icrc7_burn") {
         let displayMode = switch (args.user_preferences.minimum_content) {
           case (?#GenericDisplayMessage) #GenericDisplayMessage("Action: Burn Chess NFT. Permanently destroys your NFT.");
           case (_) #LineDisplayMessage({
@@ -917,18 +930,53 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
 
         let response : ConsentInfo = {
           metadata = {
-            language = "en";
-            utc_offset_minutes = null;
+            language = lang;
+            utc_offset_minutes = args.user_preferences.utc_offset_minutes;
           };
           consent_message = displayMode;
         };
         return #Ok(response);
       };
-      case (_) {
-        return #Err(#UnsupportedCanisterCall({
-          description = "No consent message provided for method: " # args.method;
-        }));
+      case ("burn") {
+        let displayMode = switch (args.user_preferences.minimum_content) {
+          case (?#GenericDisplayMessage) #GenericDisplayMessage("Action: Burn Chess NFT. Permanently destroys your NFT.");
+          case (_) #LineDisplayMessage({
+            pages = [{
+              lines = [
+                "Action: Burn Chess NFT",
+                "Warning: Permanently destroys your NFT.",
+                "Canister: " # Principal.toText(Principal.fromActor(Self))
+              ];
+            }];
+          });
+        };
+
+        let response : ConsentInfo = {
+          metadata = {
+            language = lang;
+            utc_offset_minutes = args.user_preferences.utc_offset_minutes;
+          };
+          consent_message = displayMode;
+        };
+        return #Ok(response);
       };
+      case (otherMethod) {
+        let response : ConsentInfo = {
+          metadata = {
+            language = lang;
+            utc_offset_minutes = null;
+          };
+          consent_message = #GenericDisplayMessage("Action: Perform " # otherMethod # " on Chess NFT Collection.");
+        };
+        return #Ok(response);
+      };
+    };
+  };
+
+  // 2. Consent Info Endpoint (Required by ICRC-21 spec)
+  public query func icrc21_canister_call_consent_info() : async Icrc21SupportedInfo {
+    return {
+      supported_display_modes = [#GenericDisplayMessage, #LineDisplayMessage];
     };
   };
 
