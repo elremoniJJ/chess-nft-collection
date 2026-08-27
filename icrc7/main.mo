@@ -93,7 +93,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   };
 
   public type UserPreferences = {
-    minimum_content : DisplayMode;
+    minimum_content : ?DisplayMode; // Made optional
     supported_languages : [Text];
     utc_offset_minutes : ?Int16.Int16;
   };
@@ -901,20 +901,26 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   public query func icrc21_canister_call_consent_message(args : ConsentMessageArgs) : async Icrc21Result {
     switch (args.method) {
       case ("burn") {
+        // Fallback to line display or generic display if minimum_content is null/unspecified
+        let displayMode = switch (args.user_preferences.minimum_content) {
+          case (?#GenericDisplayMessage) #GenericDisplayMessage("Action: Burn Chess NFT. Permanently destroys your NFT.");
+          case (_) #LineDisplayMessage({
+            pages = [{
+              lines = [
+                "Action: Burn Chess NFT",
+                "Warning: Permanently destroys your NFT.",
+                "Canister: " # Principal.toText(Principal.fromActor(Self))
+              ];
+            }];
+          });
+        };
+
         let response : ConsentInfo = {
           metadata = {
             language = "en";
             utc_offset_minutes = null;
           };
-          consent_message = #LineDisplayMessage({
-            pages = [{
-              lines = [
-                "Action: Burn Chess NFT",
-                "Warning: This will permanently destroy your NFT.",
-                "Canister: " # Principal.toText(Principal.fromActor(Self))
-              ];
-            }];
-          });
+          consent_message = displayMode;
         };
         return #Ok(response);
       };
