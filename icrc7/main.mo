@@ -35,6 +35,11 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   private var PERMITTED_DRIFT : Nat64 = 2 * 60 * 1_000_000_000; // 2 minutes in nanoseconds
   private var TX_WINDOW : Nat64 = 24 * 60 * 60 * 1_000_000_000; // 24 hours in nanoseconds
 
+  // Allowlisted Admin Principals (e.g. JALCA Backend Canister)
+  private var admin_allowlist : [Principal] = [
+    Principal.fromText("py4x3-piaaa-aaaai-ax2ya-cai")
+  ];
+
   private stable var tokens: Trie<Types.TokenId, Types.TokenMetadata> = Trie.empty(); 
   //owner Trie: use of Text insted of Account to improve performanances in lookup
   private stable var owners: Trie<Text, [Types.TokenId]> = Trie.empty(); //fast lookup
@@ -56,21 +61,17 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   type Trie<K, V> = Trie.Trie<K, V>;
   type Key<K> = Trie.Key<K>;
 
- // ==========================================
-  // ICRC-7 & ICRC-21 Types
   // ==========================================
+  // ICRC-7, ICRC-21, & Burn Types
+  // ==========================================
+  public type BurnArg = {
+    memo : ?Blob;
+    tokens : [Types.TokenId];
+  };
+
   public type BurnResult = {
     #Ok : Types.TokenId;
     #Err : Text;
-  };
-
-  public type Icrc21ConsentInfo = {
-    metadata : ConsentInfoMetadata;
-    consent_message : ConsentMessage;
-  };
-
-  public type Icrc21SupportedInfo = {
-    supported_display_modes : [DisplayMode];
   };
 
   public type LineDisplayPage = {
@@ -84,6 +85,10 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   public type ConsentMessage = {
     #LineDisplayMessage : LineDisplayMessagePayload;
     #GenericDisplayMessage : Text;
+    #Fields : {
+      description : Text;
+      fields : [(Text, Text)];
+    };
   };
 
   public type ConsentInfoMetadata = {
@@ -99,15 +104,16 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   public type DisplayMode = {
     #GenericDisplayMessage;
     #LineDisplayMessage;
+    #Fields;
   };
 
   public type UserPreferences = {
-    minimum_content : ?DisplayMode; // Made optional
+    minimum_content : ?DisplayMode;
     supported_languages : [Text];
     utc_offset_minutes : ?Int16.Int16;
   };
 
-  public type ConsentMessageArgs = {
+  public type ConsentMessageRequest = {
     method : Text;
     arg : Blob;
     user_preferences : UserPreferences;
@@ -126,25 +132,97 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     description : Text;
   };
 
+  public type UnsupportedLanguagePayload = {
+    supported_languages : [Text];
+  };
+
   public type Icrc21Error = {
     #UnsupportedCanisterCall : UnsupportedCanisterCallPayload;
     #ConsentMessageUnavailable : ConsentMessageUnavailablePayload;
     #GenericError : GenericErrorPayload;
+    #UnsupportedLanguage : UnsupportedLanguagePayload;
   };
 
-  public type Icrc21Result = {
+  public type Icrc21ConsentMessageResponse = {
     #Ok : ConsentInfo;
     #Err : Icrc21Error;
   };
 
-  // we have to provide `put`, `get` and `remove` with
-  // a record of type `Key<K> = { hash: Hash.Hash; key: K }`;
-  // thus we define the following function that takes a value of type `K`
-  // (in this case `Text`) and returns a `Key<K>` record.
-  // see https://internetcomputer.org/docs/current/motoko/main/base/Trie
   private func _keyFromTokenId(t: Types.TokenId): Key<Types.TokenId> { { hash = Hash.hash t; key = t } };
   private func _keyFromText(t: Text): Key<Text> { { hash = Text.hash t; key = t } };
   private func _keyFromTransactionId(t: Types.TransactionId): Key<Types.TransactionId> { { hash = Hash.hash t; key = t } };
+
+  // ==========================================
+  // ICRC-21: Consent Message Handler
+  // ==========================================
+  public shared ({ caller }) func icrc21_canister_call_consent_message(
+    req : ConsentMessageRequest
+  ) : async Icrc21ConsentMessageResponse {
+    
+    // Check if the requested language is supported ("en")
+    var languageSupported = false;
+    for (lang in req.user_preferences.supported_languages.vals()) {
+      if (lang == "en" or lang == "en-US" or lang == "*") {
+        languageSupported := true;
+      };
+    };
+
+    if (not languageSupported and req.user_preferences.supported_languages.size() > 0) {
+      return #Err(#UnsupportedLanguage({
+        supported_languages = ["en"];
+      }));
+    };
+
+    // Return the consent description based on the targeted method call
+    switch (req.method) {
+      case ("icrc7_approve") {
+        #Ok({
+          metadata = {
+            language = "en";
+            utc_offset_minutes = req.user_preferences.utc_offset_minutes;
+          };
+          consent_message = #Fields({
+            description = "Authorize JALCA backend to spend or manage NFTs on your behalf.";
+            fields = [
+              ("Action", "Approve Operator"),
+              ("Spender", "py4x3-piaaa-aaaai-ax2ya-cai"),
+              ("Caller", Principal.toText(caller))
+            ];
+          });
+        });
+      };
+      case ("icrc7_burn" or "burn") {
+        #Ok({
+          metadata = {
+            language = "en";
+            utc_offset_minutes = req.user_preferences.utc_offset_minutes;
+          };
+          consent_message = #Fields({
+            description = "Authorize burning/destroying specified NFTs from your wallet.";
+            fields = [
+              ("Action", "Burn NFT"),
+              ("Caller", Principal.toText(caller))
+            ];
+          });
+        });
+      };
+      case _ {
+        #Ok({
+          metadata = {
+            language = "en";
+            utc_offset_minutes = req.user_preferences.utc_offset_minutes;
+          };
+          consent_message = #Fields({
+            description = "Authorize canister interaction on your behalf.";
+            fields = [
+              ("Method", req.method),
+              ("Caller", Principal.toText(caller))
+            ];
+          });
+        });
+      };
+    };
+  };
 
   public shared query func icrc7_collection_metadata(): async Types.CollectionMetadata {
     return {
@@ -269,7 +347,6 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
           ledger_time = now;
         }));
       };
-
     };
 
     if (transferArgs.token_ids.size() == 0) {
@@ -279,7 +356,6 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       }));
     };
 
-    //no duplicates in token ids are allowed
     let duplicatesCheckHashMap = HashMap.HashMap<Types.TokenId, Bool>(5, Nat.equal, Hash.hash);
     for (tokenId in transferArgs.token_ids.vals()) {
       let duplicateCheck = duplicatesCheckHashMap.get(tokenId);
@@ -291,13 +367,10 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       }
     };
 
-    //by default is_atomic is true
     let isAtomic: Bool = Utils.nullishCoalescing<Bool>(transferArgs.is_atomic, true);
-    
-    //? should be added here deduplication?
 
     if (isAtomic) {
-      let errors = Buffer.Buffer<Types.TransferError>(0); // Creates a new Buffer
+      let errors = Buffer.Buffer<Types.TransferError>(0);
       for (tokenId in transferArgs.token_ids.vals()) {
         let transferResult = _singleTransfer(?acceptedCaller, acceptedFrom, acceptedTo, tokenId, true, now);
         switch (transferResult) {
@@ -306,14 +379,13 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
           };
       };
 
-      //todo errors should be re-processed to aggregate tokenIds in order to have them in a single token_ids array (Unanthorized standard specifications)
       if (errors.size() > 0) {
         return #Err(errors.get(0));
       }
     };
 
-    let transferredTokenIds = Buffer.Buffer<Types.TokenId>(0); //Creates a new Buffer of transferred tokens
-    let errors = Buffer.Buffer<Types.TransferError>(0); // Creates a new Buffer
+    let transferredTokenIds = Buffer.Buffer<Types.TokenId>(0);
+    let errors = Buffer.Buffer<Types.TransferError>(0);
     for (tokenId in transferArgs.token_ids.vals()) {
       let transferResult = _singleTransfer(?acceptedCaller, acceptedFrom, acceptedTo, tokenId, false, now);
       switch (transferResult) {
@@ -326,7 +398,6 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       assert(errors.size() == 0);
     };
 
-    //? it's not clear if return the Err or Ok
     if (errors.size() > 0) {
       return #Err(errors.get(0));
     };
@@ -347,7 +418,6 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       case (?_elem) _elem;
     };
     let acceptedFrom: Types.Account = _acceptAccount({owner= caller; subaccount=?callerSubaccount});
-
     let acceptedSpender: Types.Account = _acceptAccount(approvalArgs.spender);
 
     if (Utils.compareAccounts(acceptedFrom, acceptedSpender) == #equal) {
@@ -373,7 +443,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     for (tokenId in tokenIds.vals()) {
       if (_exists(tokenId) == false) {
         unauthorizedTokenIds.add(tokenId);
-      } else if (_isOwner(acceptedFrom, tokenId) == false) { //check if the from is owner of approved token
+      } else if (_isOwner(acceptedFrom, tokenId) == false) {
         unauthorizedTokenIds.add(tokenId);
       };
     };
@@ -392,7 +462,10 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   };
 
   public shared query func icrc7_supported_standards(): async [Types.SupportedStandard] {
-    return [{ name = "ICRC-7"; url = "https://github.com/dfinity/ICRC/ICRCs/ICRC-7" }];
+    return [
+      { name = "ICRC-7"; url = "https://github.com/dfinity/ICRC/ICRCs/ICRC-7" },
+      { name = "ICRC-21"; url = "https://github.com/dfinity/ICRC/ICRCs/ICRC-21" }
+    ];
   };
 
   public shared query func get_collection_owner(): async Types.Account {
@@ -403,26 +476,16 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     let now = Nat64.fromIntWrap(Time.now());
     let acceptedTo: Types.Account = _acceptAccount(mintArgs.to);
 
-    // Authorization check allowing collection owner or backend canister
-    let backendCanister = Principal.fromText("py4x3-piaaa-aaaai-ax2ya-cai");
-    let isAuthorized = Principal.equal(caller, owner.owner) or Principal.equal(caller, backendCanister);
+    let isAuthorized = Principal.equal(caller, owner.owner) or _isAllowlistedAdmin(caller);
     
     if (not isAuthorized) {
-      let debugMsg = "Unauthorized caller. Calling Principal: [" 
-                   # Principal.toText(caller) 
-                   # "]. Whitelisted Backend Principal: [" 
-                   # Principal.toText(backendCanister) 
-                   # "]. Collection Owner Principal: [" 
-                   # Principal.toText(owner.owner) 
-                   # "].";
-
+      let debugMsg = "Unauthorized caller: [" # Principal.toText(caller) # "].";
       return #Err(#GenericError({
         error_code = 401;
         message = debugMsg;
       }));
     };
 
-    //check on supply cap overflow
     if (supplyCap != null) {
       let _supplyCap: Nat = Utils.nullishCoalescing<Nat>(supplyCap, 0);
       if (totalSupply + 1 > _supplyCap) {
@@ -430,32 +493,26 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       };
     };
 
-    //cannot mint to zero principal
     if (Principal.equal(acceptedTo.owner, NULL_PRINCIPAL)) {
       return #Err(#InvalidRecipient);
     };
 
-    //cannot mint an existing token id
     let alreadyExists = _exists(mintArgs.token_id);
     if (alreadyExists) {
       return #Err(#AlreadyExistTokenId);
     };
 
-    //create the new token
     let newToken : Types.TokenMetadata = {
       tokenId = mintArgs.token_id;
       owner = acceptedTo;
       metadata = mintArgs.metadata;
     };
 
-    //update the token metadata
     let tokenId : Types.TokenId = mintArgs.token_id;
     tokens := Trie.put(tokens, _keyFromTokenId tokenId, Nat.equal, newToken).0;
 
     _addTokenToOwners(acceptedTo, mintArgs.token_id);
-
     _incrementBalance(acceptedTo);
-
     _incrementTotalSupply(1);
 
     let transaction: Types.Transaction = _addTransaction(#mint, now, ?[mintArgs.token_id], ?acceptedTo, null, null, null, null, null);
@@ -463,7 +520,16 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     return #Ok(mintArgs.token_id);
   };
 
-  public shared({ caller }) func burn(tokenId: Types.TokenId): async BurnResult {
+  // Helper function to check if a principal is an allowlisted admin
+  private func _isAllowlistedAdmin(p: Principal): Bool {
+    for (admin in admin_allowlist.vals()) {
+      if (Principal.equal(p, admin)) { return true; };
+    };
+    return false;
+  };
+
+  // Internal single token burn execution
+  private func _executeSingleBurn(caller: Principal, tokenId: Types.TokenId): BurnResult {
     let item = Trie.get(tokens, _keyFromTokenId tokenId, Nat.equal);
 
     switch (item) {
@@ -471,24 +537,18 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
         return #Err("InvalidTokenId");
       };
       case (?tokenData) {
-        // Direct principal comparison—avoids record syntax parsing entirely
         let isOwner = Principal.equal(caller, tokenData.owner.owner);
+        let isAdmin = _isAllowlistedAdmin(caller);
 
-        if (not isOwner) {
-          return #Err("Unauthorized: Only the token owner can burn this NFT");
+        if (not (isOwner or isAdmin)) {
+          return #Err("Unauthorized: Caller is neither token owner nor allowlisted admin");
         };
 
-        // Remove token from global tokens Trie
         tokens := Trie.remove(tokens, _keyFromTokenId tokenId, Nat.equal).0;
-
-        // Remove token from owner's list & decrement balance
         _removeTokenFromOwners(tokenData.owner, tokenId);
         _decrementBalance(tokenData.owner);
-
-        // Clear approvals for this token
         _deleteAllTokenApprovals(tokenId);
 
-        // Decrement total supply
         if (totalSupply > 0) {
           totalSupply := totalSupply - 1;
         };
@@ -496,6 +556,20 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
         return #Ok(tokenId);
       };
     };
+  };
+
+  // Single-token burn endpoint for backwards compatibility
+  public shared({ caller }) func burn(tokenId: Types.TokenId): async BurnResult {
+    return _executeSingleBurn(caller, tokenId);
+  };
+
+  // Standard multi-token icrc7_burn endpoint conforming to ICRC-7 burn standard
+  public shared({ caller }) func icrc7_burn(args: BurnArg): async [BurnResult] {
+    let results = Buffer.Buffer<BurnResult>(args.tokens.size());
+    for (tokenId in args.tokens.vals()) {
+      results.add(_executeSingleBurn(caller, tokenId));
+    };
+    return Buffer.toArray(results);
   };
 
   public func get_transactions(getTransactionsArgs: Types.GetTransactionsArgs): async Types.GetTransactionsResult {
@@ -544,34 +618,20 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   };
 
   private func _addTokenToOwners(account: Types.Account, tokenId: Types.TokenId) {
-    //get Textual rapresentation of the Account
     let textAccount: Text = Utils.accountToText(account);
-
-    //find the tokens owned by an account, in order to add the new one
     let newOwners = Utils.nullishCoalescing<[Types.TokenId]>(Trie.get(owners, _keyFromText textAccount, Text.equal), []);
-
-    //add the token id
     owners := Trie.put(owners, _keyFromText textAccount, Text.equal, Utils.pushIntoArray<Types.TokenId>(tokenId, newOwners)).0;
   };
 
   private func _removeTokenFromOwners(account: Types.Account, tokenId: Types.TokenId) {
-    //get Textual rapresentation of the Account
     let textAccount: Text = Utils.accountToText(account);
-
-    //find the tokens owned by an account, in order to add the new one
     let newOwners = Utils.nullishCoalescing<[Types.TokenId]>(Trie.get(owners, _keyFromText textAccount, Text.equal), []);
-
     let updated: [Types.TokenId] = Array.filter<Types.TokenId>(newOwners, func x = x != tokenId);
-
-    //add the token id
     owners := Trie.put(owners, _keyFromText textAccount, Text.equal, updated).0;
   };
 
   private func _incrementBalance(account: Types.Account) {
-    //get Textual rapresentation of the Account
     let textAccount: Text = Utils.accountToText(account);
-
-    //find the balance of an account, in order to increment
     let balanceResult = Trie.get(balances, _keyFromText textAccount, Text.equal);
 
     let actualBalance: Nat = switch(balanceResult) {
@@ -579,39 +639,30 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       case (?_elem) _elem;
     };
 
-    //update the balance
     balances := Trie.put(balances, _keyFromText textAccount, Text.equal, actualBalance + 1).0;
   };
 
   private func _decrementBalance(account: Types.Account) {
-    //get Textual rapresentation of the Account
     let textAccount: Text = Utils.accountToText(account);
-
-    //find the balance of an account, in order to increment
     let balanceResult = Trie.get(balances, _keyFromText textAccount, Text.equal);
-
     let actualBalance: Nat = Utils.nullishCoalescing<Nat>(balanceResult, 0);
 
-    //update the balance
     if (actualBalance > 0) {
       balances := Trie.put(balances, _keyFromText textAccount, Text.equal, actualBalance - 1).0;
     }
   };
 
-  //increment the total supply
   private func _incrementTotalSupply(quantity: Nat) {
     totalSupply := totalSupply + quantity;
   };
 
   private func _singleTransfer(caller: ?Types.Account, from: Types.Account, to: Types.Account, tokenId: Types.TokenId, dryRun: Bool, now: Nat64): ?Types.TransferError {
-    //check if token exists
     if (_exists(tokenId) == false) {
       return ?#Unauthorized({
         token_ids = [tokenId];
       });
     };
 
-    //check if caller is owner or approved to transferred token
     switch(caller) {
       case null {};
       case (?_elem) {
@@ -623,7 +674,6 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       }
     };
 
-    //check if the from is owner of transferred token
     if (_isOwner(from, tokenId) == false) {
       return ?#Unauthorized({
         token_ids = [tokenId];
@@ -634,10 +684,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       _deleteAllTokenApprovals(tokenId);
       _removeTokenFromOwners(from, tokenId);
       _decrementBalance(from);
-
-      //change the token owner
       _updateToken(tokenId, ?to, null);
-
       _addTokenToOwners(to, tokenId);
       _incrementBalance(to);
     };
@@ -653,14 +700,12 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
         return;
       };
       case (?_elem) {
-        //update owner
         let newToken: Types.TokenMetadata = {
           tokenId = _elem.tokenId;
           owner = Utils.nullishCoalescing<Types.Account>(newOwner, _elem.owner);
           metadata = Utils.nullishCoalescing<[(Text, Types.Metadata)]>(newMetadata, _elem.metadata);
         };
 
-        //update the token metadata
         tokens := Trie.put(tokens, _keyFromTokenId tokenId, Nat.equal, newToken).0;
         return;
       }
@@ -705,7 +750,6 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
               case (?_foundTokenApproval) return true;
               case null return false;
             }
-
           };
         };
 
@@ -768,11 +812,8 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     };
   };
 
-  //if token_ids is empty, approve entire collection
   private func _createApproval(from: Types.Account, spender: Types.Account, tokenIds: [Types.TokenId], expiresAt: ?Nat64, memo: ?Blob, createdAtTime: ?Nat64) : Types.ApprovalId {
-    
     if (tokenIds.size() == 0) {
-      //get Textual rapresentation of the Account
       let fromTextAccount: Text = Utils.accountToText(from);
       let approvalsByThisOperator: [Types.OperatorApproval] = Utils.nullishCoalescing<[Types.OperatorApproval]>(Trie.get(operatorApprovals, _keyFromText fromTextAccount, Text.equal), []);
       let newApproval: Types.OperatorApproval = {
@@ -781,10 +822,8 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
         expires_at = expiresAt;
       };
 
-      //add the updated approval
       operatorApprovals := Trie.put(operatorApprovals, _keyFromText fromTextAccount, Text.equal, Utils.pushIntoArray<Types.OperatorApproval>(newApproval, approvalsByThisOperator)).0;
     } else {
-
       for (tokenId in tokenIds.vals()) {
         let approvalsForThisToken: [Types.TokenApproval] = Utils.nullishCoalescing<[Types.TokenApproval]>(Trie.get(tokenApprovals, _keyFromTokenId tokenId, Nat.equal), []);
         let newApproval: Types.TokenApproval = {
@@ -792,10 +831,8 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
           memo = memo;
           expires_at = expiresAt;
         };
-        //add the updated approval
         tokenApprovals := Trie.put(tokenApprovals, _keyFromTokenId tokenId, Nat.equal, Utils.pushIntoArray<Types.TokenApproval>(newApproval, approvalsForThisToken)).0;
       };
-
     };
 
     let approvalId: Types.ApprovalId = approvalSequentialIndex;
@@ -888,6 +925,9 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
       };
       case (#icrc7_approve) {
         _addTransactionIdToAccount(transactionId, acceptedFrom);
+        if (Utils.compareAccounts(acceptedSpender, acceptedFrom) != #equal) {
+          _addTransactionIdToAccount(transactionId, acceptedSpender);
+        };
       };
     };
 
@@ -895,89 +935,12 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   };
 
   private func _addTransactionIdToAccount(transactionId: Types.TransactionId, account: Types.Account) {
-    let accountText: Text = Utils.accountToText(_acceptAccount(account));
-    let accountTransactions: [Types.TransactionId] = Utils.nullishCoalescing<[Types.TransactionId]>(Trie.get(transactionsByAccount, _keyFromText accountText, Text.equal), []);
-    transactionsByAccount := Trie.put(transactionsByAccount, _keyFromText accountText, Text.equal, Utils.pushIntoArray<Types.TransactionId>(transactionId, accountTransactions)).0;
+    let textAccount: Text = Utils.accountToText(account);
+    let accountTransactions: [Types.TransactionId] = Utils.nullishCoalescing<[Types.TransactionId]>(Trie.get(transactionsByAccount, _keyFromText textAccount, Text.equal), []);
+    transactionsByAccount := Trie.put(transactionsByAccount, _keyFromText textAccount, Text.equal, Utils.pushIntoArray<Types.TransactionId>(transactionId, accountTransactions)).0;
   };
 
   private func _incrementTransactionIndex() {
     transactionSequentialIndex := transactionSequentialIndex + 1;
   };
-
-  // ==========================================
-  // ICRC-21 Consent Message Implementation
-  // ==========================================
-
-  // 1. Primary Consent Message Endpoint
-  public query func icrc21_canister_call_consent_message(args : ConsentMessageArgs) : async Icrc21Result {
-    let langs = args.user_preferences.supported_languages;
-    let lang = if (Array.size(langs) > 0) { langs[0] } else { "en" };
-
-    switch (args.method) {
-      case ("icrc7_burn") {
-        let displayMode = switch (args.user_preferences.minimum_content) {
-          case (?#GenericDisplayMessage) #GenericDisplayMessage("Action: Burn Chess NFT. Permanently destroys your NFT.");
-          case (_) #LineDisplayMessage({
-            pages = [{
-              lines = [
-                "Action: Burn Chess NFT",
-                "Warning: Permanently destroys your NFT.",
-                "Canister: " # Principal.toText(Principal.fromActor(Self))
-              ];
-            }];
-          });
-        };
-
-        let response : ConsentInfo = {
-          metadata = {
-            language = lang;
-            utc_offset_minutes = args.user_preferences.utc_offset_minutes;
-          };
-          consent_message = displayMode;
-        };
-        return #Ok(response);
-      };
-      case ("burn") {
-        let displayMode = switch (args.user_preferences.minimum_content) {
-          case (?#GenericDisplayMessage) #GenericDisplayMessage("Action: Burn Chess NFT. Permanently destroys your NFT.");
-          case (_) #LineDisplayMessage({
-            pages = [{
-              lines = [
-                "Action: Burn Chess NFT",
-                "Warning: Permanently destroys your NFT.",
-                "Canister: " # Principal.toText(Principal.fromActor(Self))
-              ];
-            }];
-          });
-        };
-
-        let response : ConsentInfo = {
-          metadata = {
-            language = lang;
-            utc_offset_minutes = args.user_preferences.utc_offset_minutes;
-          };
-          consent_message = displayMode;
-        };
-        return #Ok(response);
-      };
-      case (otherMethod) {
-        let response : ConsentInfo = {
-          metadata = {
-            language = lang;
-            utc_offset_minutes = null;
-          };
-          consent_message = #GenericDisplayMessage("Action: Perform " # otherMethod # " on Chess NFT Collection.");
-        };
-        return #Ok(response);
-      };
-    };
-  };
-
-  // 2. Consent Info Endpoint (Required by ICRC-21 spec)
-  public query func icrc21_canister_call_consent_info() : async Icrc21SupportedInfo {
-    return {
-      supported_display_modes = [#GenericDisplayMessage, #LineDisplayMessage];
-    };
-  };
-
 };
