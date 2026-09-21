@@ -107,10 +107,11 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     #Fields;
   };
 
+  // 1. Change supported_languages from [Text] to ?[Text]
   public type UserPreferences = {
-    minimum_content : ?DisplayMode;
-    supported_languages : [Text];
-    utc_offset_minutes : ?Int16.Int16;
+    minimum_content : ?Text;
+    supported_languages : ?[Text]; // Changed to optional
+    utc_offset_minutes : ?Int16;
   };
 
   public type ConsentMessageRequest = {
@@ -159,15 +160,21 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     req : ConsentMessageRequest
   ) : async Icrc21ConsentMessageResponse {
     
-    // Check if the requested language is supported ("en")
+    // Fall back to ["en"] if supported_languages is omitted (null)
+    let requestedLangs : [Text] = switch (req.user_preferences.supported_languages) {
+      case (?langs) langs;
+      case (null) ["en"];
+    };
+
+    // Check if any requested language matches supported languages ("en", "en-US", "*")
     var languageSupported = false;
-    for (lang in req.user_preferences.supported_languages.vals()) {
+    for (lang in requestedLangs.vals()) {
       if (lang == "en" or lang == "en-US" or lang == "*") {
         languageSupported := true;
       };
     };
 
-    if (not languageSupported and req.user_preferences.supported_languages.size() > 0) {
+    if (not languageSupported and requestedLangs.size() > 0) {
       return #Err(#UnsupportedLanguage({
         supported_languages = ["en"];
       }));
