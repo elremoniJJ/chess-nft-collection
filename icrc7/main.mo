@@ -74,43 +74,9 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     #Err : Text;
   };
 
-  public type LineDisplayPage = {
-    lines : [Text];
-  };
-
-  public type LineDisplayMessagePayload = {
-    pages : [LineDisplayPage];
-  };
-
-  public type ConsentMessage = {
-    #LineDisplayMessage : LineDisplayMessagePayload;
-    #GenericDisplayMessage : Text;
-    #Fields : {
-      description : Text;
-      fields : [(Text, Text)];
-    };
-  };
-
-  public type ConsentInfoMetadata = {
-    language : Text;
-    utc_offset_minutes : ?Int16.Int16;
-  };
-
-  public type ConsentInfo = {
-    metadata : ConsentInfoMetadata;
-    consent_message : ConsentMessage;
-  };
-
-  public type DisplayMode = {
-    #GenericDisplayMessage;
-    #LineDisplayMessage;
-    #Fields;
-  };
-
-  // 1. Change supported_languages from [Text] to ?[Text]
   public type UserPreferences = {
     minimum_content : ?Text;
-    supported_languages : ?[Text]; // Changed to optional
+    supported_languages : ?[Text]; // Optional for ICRC-21
     utc_offset_minutes : ?Int16;
   };
 
@@ -144,8 +110,29 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     #UnsupportedLanguage : UnsupportedLanguagePayload;
   };
 
+  public type Icrc21ConsentMessage = {
+    #Fields : {
+      description : Text;
+      fields : ?[(Text, Text)]; // Optional (?) for ICRC-21 spec compliance
+    };
+    #GenericDisplay : {
+      description : Text;
+    };
+    #LineDisplay : {
+      lines : [(Text, Text)];
+    };
+  };
+
+  public type Icrc21ConsentInfo = {
+    metadata : {
+      language : Text;
+      utc_offset_minutes : ?Int16;
+    };
+    consent_message : Icrc21ConsentMessage;
+  };
+
   public type Icrc21ConsentMessageResponse = {
-    #Ok : ConsentInfo;
+    #Ok : Icrc21ConsentInfo;
     #Err : Icrc21Error;
   };
 
@@ -190,7 +177,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
           };
           consent_message = #Fields({
             description = "Authorize JALCA backend to spend or manage NFTs on your behalf.";
-            fields = [
+            fields = ?[
               ("Action", "Approve Operator"),
               ("Spender", "py4x3-piaaa-aaaai-ax2ya-cai"),
               ("Caller", Principal.toText(caller))
@@ -206,7 +193,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
           };
           consent_message = #Fields({
             description = "Authorize burning/destroying specified NFTs from your wallet.";
-            fields = [
+            fields = ?[
               ("Action", "Burn NFT"),
               ("Caller", Principal.toText(caller))
             ];
@@ -221,7 +208,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
           };
           consent_message = #Fields({
             description = "Authorize canister interaction on your behalf.";
-            fields = [
+            fields = ?[
               ("Method", req.method),
               ("Caller", Principal.toText(caller))
             ];
@@ -912,39 +899,20 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     };
 
     transactions := Trie.put(transactions, _keyFromTransactionId transactionId, Nat.equal, transaction).0;
-    
-    switch kind {
-      case (#mint) {
-        _addTransactionIdToAccount(transactionId, acceptedTo);
-      };
-      case (#icrc7_transfer) {
-        _addTransactionIdToAccount(transactionId, acceptedTo);
-        if (from != null) {
-          if (Utils.compareAccounts(acceptedFrom, acceptedTo) != #equal) {
-            _addTransactionIdToAccount(transactionId, acceptedFrom);
-          }
-        };
-        if (spender != null) {
-          if (Utils.compareAccounts(acceptedSpender, acceptedTo) != #equal and Utils.compareAccounts(acceptedSpender, acceptedFrom) != #equal) {
-            _addTransactionIdToAccount(transactionId, acceptedSpender);
-          };
-        };
-      };
-      case (#icrc7_approve) {
-        _addTransactionIdToAccount(transactionId, acceptedFrom);
-        if (Utils.compareAccounts(acceptedSpender, acceptedFrom) != #equal) {
-          _addTransactionIdToAccount(transactionId, acceptedSpender);
-        };
-      };
-    };
+
+    _addTransactionToAccount(acceptedFrom, transactionId);
+    _addTransactionToAccount(acceptedTo, transactionId);
+    _addTransactionToAccount(acceptedSpender, transactionId);
 
     return transaction;
   };
 
-  private func _addTransactionIdToAccount(transactionId: Types.TransactionId, account: Types.Account) {
-    let textAccount: Text = Utils.accountToText(account);
-    let accountTransactions: [Types.TransactionId] = Utils.nullishCoalescing<[Types.TransactionId]>(Trie.get(transactionsByAccount, _keyFromText textAccount, Text.equal), []);
-    transactionsByAccount := Trie.put(transactionsByAccount, _keyFromText textAccount, Text.equal, Utils.pushIntoArray<Types.TransactionId>(transactionId, accountTransactions)).0;
+  private func _addTransactionToAccount(account: Types.Account, transactionId: Types.TransactionId) {
+    if (Principal.equal(account.owner, NULL_PRINCIPAL) == false) {
+      let textAccount: Text = Utils.accountToText(account);
+      let accountTransactions = Utils.nullishCoalescing<[Types.TransactionId]>(Trie.get(transactionsByAccount, _keyFromText textAccount, Text.equal), []);
+      transactionsByAccount := Trie.put(transactionsByAccount, _keyFromText textAccount, Text.equal, Utils.pushIntoArray<Types.TransactionId>(transactionId, accountTransactions)).0;
+    };
   };
 
   private func _incrementTransactionIndex() {
