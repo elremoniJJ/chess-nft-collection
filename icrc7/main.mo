@@ -1,7 +1,7 @@
 import Nat "mo:base/Nat";
 import Nat16 "mo:base/Nat16";
 import Nat64 "mo:base/Nat64";
-import Int32 "mo:base/Int32";
+import Int16 "mo:base/Int16";
 import Blob "mo:base/Blob";
 import Bool "mo:base/Bool";
 import Principal "mo:base/Principal";
@@ -76,33 +76,41 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
 
   // ==========================================
   // Strict ICRC-21 Specification Compliance Types
+  // These mirror https://github.com/dfinity/wg-identity-authentication/blob/main/topics/ICRC-21/ICRC-21.did
+  // field-for-field. Do not rename or add/remove fields here without checking
+  // the .did against the spec again — OISY decodes against the exact shape below.
   // ==========================================
   public type Icrc21ConsentMessageMetadata = {
     language : Text;
-    utc_offset_minutes : ?Int32;
+    utc_offset_minutes : ?Int16;
+  };
+
+  public type Icrc21DeviceSpec = {
+    #GenericDisplay;
+    #LineDisplay : {
+      characters_per_line : Nat16;
+      lines_per_page : Nat16;
+    };
+  };
+
+  public type Icrc21ConsentMessageSpec = {
+    metadata : Icrc21ConsentMessageMetadata;
+    device_spec : ?Icrc21DeviceSpec;
   };
 
   public type Icrc21ConsentMessageRequest = {
     method : Text;
     arg : Blob;
-    user_preferences : {
-      minimum_content : ?Text;
-      supported_languages : [Text];
-      utc_offset_minutes : ?Int32;
-    };
+    user_preferences : Icrc21ConsentMessageSpec;
+  };
+
+  public type Icrc21LineDisplayPage = {
+    lines : [Text];
   };
 
   public type Icrc21ConsentMessage = {
-    #Fields : {
-      description : Text;
-      fields : ?[(Text, Text)];
-    };
-    #GenericDisplay : {
-      description : Text;
-    };
-    #LineDisplay : {
-      lines : [(Text, Text)];
-    };
+    #GenericDisplayMessage : Text;
+    #LineDisplayMessage : { pages : [Icrc21LineDisplayPage] };
   };
 
   public type Icrc21ConsentInfo = {
@@ -128,70 +136,50 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
 
   // ==========================================
   // ICRC-21: Consent Message Handler
+  // Must remain an update call (not query) and must not require
+  // authentication — OISY probes this anonymously per spec.
   // ==========================================
   public shared ({ caller }) func icrc21_canister_call_consent_message(
     req : Icrc21ConsentMessageRequest
   ) : async Icrc21ConsentMessageResponse {
-    
-    // Check if any requested language matches supported languages ("en", "en-US", "*")
-    var languageSupported = false;
-    for (lang in req.user_preferences.supported_languages.vals()) {
-      if (lang == "en" or lang == "en-US" or lang == "*") {
-        languageSupported := true;
-      };
-    };
 
-    if (not languageSupported and req.user_preferences.supported_languages.size() > 0) {
-      return #Err(#GenericError({
-        error_code = 400;
-        description = "Unsupported language request";
-      }));
-    };
+    // We only support English messages today. Per spec the canister is
+    // allowed to respond in whatever language it supports; it does not
+    // have to match the requester's preference exactly.
+    let responseLanguage : Text = "en";
+    let utcOffset : ?Int16 = req.user_preferences.metadata.utc_offset_minutes;
 
     switch (req.method) {
       case ("icrc7_approve") {
         #Ok({
-          consent_message = #Fields({
-            description = "Authorize JALCA backend to spend or manage NFTs on your behalf.";
-            fields = ?[
-              ("Action", "Approve Operator"),
-              ("Spender", "py4x3-piaaa-aaaai-ax2ya-cai"),
-              ("Caller", Principal.toText(caller))
-            ];
-          });
+          consent_message = #GenericDisplayMessage(
+            "Authorize JALCA backend (py4x3-piaaa-aaaai-ax2ya-cai) to manage NFTs on your behalf.\nCaller: " # Principal.toText(caller)
+          );
           metadata = {
-            language = "en";
-            utc_offset_minutes = req.user_preferences.utc_offset_minutes;
+            language = responseLanguage;
+            utc_offset_minutes = utcOffset;
           };
         });
       };
       case ("icrc7_burn" or "burn") {
         #Ok({
-          consent_message = #Fields({
-            description = "Authorize burning/destroying specified NFTs from your wallet.";
-            fields = ?[
-              ("Action", "Burn NFT"),
-              ("Caller", Principal.toText(caller))
-            ];
-          });
+          consent_message = #GenericDisplayMessage(
+            "This will permanently burn/destroy the specified NFT(s) from your wallet. This action cannot be undone.\nCaller: " # Principal.toText(caller)
+          );
           metadata = {
-            language = "en";
-            utc_offset_minutes = req.user_preferences.utc_offset_minutes;
+            language = responseLanguage;
+            utc_offset_minutes = utcOffset;
           };
         });
       };
-      case _ {
+      case (_) {
         #Ok({
-          consent_message = #Fields({
-            description = "Authorize canister interaction on your behalf.";
-            fields = ?[
-              ("Method", req.method),
-              ("Caller", Principal.toText(caller))
-            ];
-          });
+          consent_message = #GenericDisplayMessage(
+            "Authorize canister interaction: " # req.method # ".\nCaller: " # Principal.toText(caller)
+          );
           metadata = {
-            language = "en";
-            utc_offset_minutes = req.user_preferences.utc_offset_minutes;
+            language = responseLanguage;
+            utc_offset_minutes = utcOffset;
           };
         });
       };
