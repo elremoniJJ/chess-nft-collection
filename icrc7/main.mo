@@ -1,7 +1,7 @@
 import Nat "mo:base/Nat";
 import Nat16 "mo:base/Nat16";
 import Nat64 "mo:base/Nat64";
-import Int16 "mo:base/Int16";
+import Int32 "mo:base/Int32";
 import Blob "mo:base/Blob";
 import Bool "mo:base/Bool";
 import Principal "mo:base/Principal";
@@ -62,7 +62,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   type Key<K> = Trie.Key<K>;
 
   // ==========================================
-  // ICRC-7, ICRC-21, & Burn Types
+  // ICRC-7 & Burn Types
   // ==========================================
   public type BurnArg = {
     memo : ?Blob;
@@ -74,46 +74,28 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     #Err : Text;
   };
 
-  public type UserPreferences = {
-    minimum_content : ?Text;
-    supported_languages : ?[Text]; // Optional for ICRC-21
-    utc_offset_minutes : ?Int16;
+  // ==========================================
+  // Strict ICRC-21 Specification Compliance Types
+  // ==========================================
+  public type Icrc21ConsentMessageMetadata = {
+    language : Text;
+    utc_offset_minutes : ?Int32;
   };
 
-  public type ConsentMessageRequest = {
+  public type Icrc21ConsentMessageRequest = {
     method : Text;
     arg : Blob;
-    user_preferences : UserPreferences;
-  };
-
-  public type UnsupportedCanisterCallPayload = {
-    description : Text;
-  };
-
-  public type ConsentMessageUnavailablePayload = {
-    description : Text;
-  };
-
-  public type GenericErrorPayload = {
-    error_code : Nat;
-    description : Text;
-  };
-
-  public type UnsupportedLanguagePayload = {
-    supported_languages : [Text];
-  };
-
-  public type Icrc21Error = {
-    #UnsupportedCanisterCall : UnsupportedCanisterCallPayload;
-    #ConsentMessageUnavailable : ConsentMessageUnavailablePayload;
-    #GenericError : GenericErrorPayload;
-    #UnsupportedLanguage : UnsupportedLanguagePayload;
+    user_preferences : {
+      minimum_content : ?Text;
+      supported_languages : [Text];
+      utc_offset_minutes : ?Int32;
+    };
   };
 
   public type Icrc21ConsentMessage = {
     #Fields : {
       description : Text;
-      fields : ?[(Text, Text)]; // Optional (?) for ICRC-21 spec compliance
+      fields : ?[(Text, Text)];
     };
     #GenericDisplay : {
       description : Text;
@@ -124,11 +106,15 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   };
 
   public type Icrc21ConsentInfo = {
-    metadata : {
-      language : Text;
-      utc_offset_minutes : ?Int16;
-    };
     consent_message : Icrc21ConsentMessage;
+    metadata : Icrc21ConsentMessageMetadata;
+  };
+
+  public type Icrc21Error = {
+    #UnsupportedCanisterCall : { description : Text };
+    #ConsentMessageUnavailable : { description : Text };
+    #InsufficientPayment : { description : Text };
+    #GenericError : { error_code : Nat; description : Text };
   };
 
   public type Icrc21ConsentMessageResponse = {
@@ -144,37 +130,27 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
   // ICRC-21: Consent Message Handler
   // ==========================================
   public shared ({ caller }) func icrc21_canister_call_consent_message(
-    req : ConsentMessageRequest
+    req : Icrc21ConsentMessageRequest
   ) : async Icrc21ConsentMessageResponse {
     
-    // Fall back to ["en"] if supported_languages is omitted (null)
-    let requestedLangs : [Text] = switch (req.user_preferences.supported_languages) {
-      case (?langs) langs;
-      case (null) ["en"];
-    };
-
     // Check if any requested language matches supported languages ("en", "en-US", "*")
     var languageSupported = false;
-    for (lang in requestedLangs.vals()) {
+    for (lang in req.user_preferences.supported_languages.vals()) {
       if (lang == "en" or lang == "en-US" or lang == "*") {
         languageSupported := true;
       };
     };
 
-    if (not languageSupported and requestedLangs.size() > 0) {
-      return #Err(#UnsupportedLanguage({
-        supported_languages = ["en"];
+    if (not languageSupported and req.user_preferences.supported_languages.size() > 0) {
+      return #Err(#GenericError({
+        error_code = 400;
+        description = "Unsupported language request";
       }));
     };
 
-    // Return the consent description based on the targeted method call
     switch (req.method) {
       case ("icrc7_approve") {
         #Ok({
-          metadata = {
-            language = "en";
-            utc_offset_minutes = req.user_preferences.utc_offset_minutes;
-          };
           consent_message = #Fields({
             description = "Authorize JALCA backend to spend or manage NFTs on your behalf.";
             fields = ?[
@@ -183,14 +159,14 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
               ("Caller", Principal.toText(caller))
             ];
           });
-        });
-      };
-      case ("icrc7_burn" or "burn") {
-        #Ok({
           metadata = {
             language = "en";
             utc_offset_minutes = req.user_preferences.utc_offset_minutes;
           };
+        });
+      };
+      case ("icrc7_burn" or "burn") {
+        #Ok({
           consent_message = #Fields({
             description = "Authorize burning/destroying specified NFTs from your wallet.";
             fields = ?[
@@ -198,14 +174,14 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
               ("Caller", Principal.toText(caller))
             ];
           });
-        });
-      };
-      case _ {
-        #Ok({
           metadata = {
             language = "en";
             utc_offset_minutes = req.user_preferences.utc_offset_minutes;
           };
+        });
+      };
+      case _ {
+        #Ok({
           consent_message = #Fields({
             description = "Authorize canister interaction on your behalf.";
             fields = ?[
@@ -213,6 +189,10 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
               ("Caller", Principal.toText(caller))
             ];
           });
+          metadata = {
+            language = "en";
+            utc_offset_minutes = req.user_preferences.utc_offset_minutes;
+          };
         });
       };
     };
