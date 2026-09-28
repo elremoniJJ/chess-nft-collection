@@ -533,6 +533,69 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     };
     return Buffer.toArray(results);
   };
+  // ==========================================
+  // Metadata read + backfill additions
+  // ==========================================
+
+  // Standard ICRC-7 batch metadata read. Null for unknown token ids.
+  public shared query func icrc7_token_metadata(tokenIds: [Types.TokenId]): async [?[(Text, Types.Metadata)]] {
+    Array.map<Types.TokenId, ?[(Text, Types.Metadata)]>(tokenIds, func (id) {
+      switch (Trie.get(tokens, _keyFromTokenId id, Nat.equal)) {
+        case null { null };
+        case (?t) { ?t.metadata };
+      };
+    });
+  };
+
+  // Lists token ids that lack either jalca: key, to size the backfill.
+  public shared query func tokens_missing_jalca_keys(): async [Types.TokenId] {
+    let all = Trie.toArray<Types.TokenId, Types.TokenMetadata, Types.TokenMetadata>(tokens, func (_k, v) = v);
+    let missing = Buffer.Buffer<Types.TokenId>(0);
+    for (t in all.vals()) {
+      if (not (_hasKey(t.metadata, "jalca:spell_name") and _hasKey(t.metadata, "jalca:game_number"))) {
+        missing.add(t.tokenId);
+      };
+    };
+    Buffer.toArray(missing)
+  };
+
+  // Admin-only. Adds missing keys to an existing token. It never overwrites
+  // an existing key and only accepts the three keys the burn path needs.
+  public shared({ caller }) func backfill_token_metadata(
+    tokenId: Types.TokenId,
+    entries: [(Text, Types.Metadata)]
+  ): async { #Ok : Nat; #Err : Text } {
+    if (not (Principal.equal(caller, owner.owner) or _isAllowlistedAdmin(caller))) {
+      return #Err("Unauthorized");
+    };
+    switch (Trie.get(tokens, _keyFromTokenId tokenId, Nat.equal)) {
+      case null { #Err("InvalidTokenId") };
+      case (?tok) {
+        let merged = Buffer.Buffer<(Text, Types.Metadata)>(tok.metadata.size() + entries.size());
+        for (e in tok.metadata.vals()) { merged.add(e) };
+        var added : Nat = 0;
+        for ((k, v) in entries.vals()) {
+          if (_isBackfillKeyAllowed(k) and not _hasKey(tok.metadata, k)) {
+            merged.add((k, v));
+            added += 1;
+          };
+        };
+        _updateToken(tokenId, null, ?Buffer.toArray(merged));
+        #Ok(added)
+      };
+    };
+  };
+
+  private func _hasKey(md: [(Text, Types.Metadata)], key: Text): Bool {
+    for ((k, _v) in md.vals()) {
+      if (k == key) { return true };
+    };
+    false
+  };
+
+  private func _isBackfillKeyAllowed(k: Text): Bool {
+    k == "spellName" or k == "jalca:spell_name" or k == "jalca:game_number"
+  };
 
   public func get_transactions(getTransactionsArgs: Types.GetTransactionsArgs): async Types.GetTransactionsResult {
     let result : Types.GetTransactionsResult = switch (getTransactionsArgs.account) {
