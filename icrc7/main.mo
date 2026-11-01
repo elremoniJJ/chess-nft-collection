@@ -12,6 +12,7 @@ import Array "mo:base/Array";
 import Buffer "mo:base/Buffer";
 import HashMap "mo:base/HashMap";
 import Time "mo:base/Time";
+import Debug "mo:base/Debug";
 import Types "./types";
 import Utils "./utils";
 
@@ -253,6 +254,16 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
         return #Ok(_elem.owner);
       }
     };
+  };
+
+  // Standard name for the supported-standards query (ICRC-10).
+  // OISY calls this to detect ICRC-7 collections.
+  public shared query func icrc10_supported_standards(): async [Types.SupportedStandard] {
+    return [
+      { name = "ICRC-7"; url = "https://github.com/dfinity/ICRC/ICRCs/ICRC-7" },
+      { name = "ICRC-10"; url = "https://github.com/dfinity/ICRC/ICRCs/ICRC-10" },
+      { name = "ICRC-21"; url = "https://github.com/dfinity/ICRC/ICRCs/ICRC-21" }
+    ];
   };
 
   public shared query func icrc7_balance_of(account: Types.Account): async Types.BalanceResult {
@@ -533,6 +544,7 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
     };
     return Buffer.toArray(results);
   };
+
   // ==========================================
   // Metadata read + backfill additions
   // ==========================================
@@ -595,6 +607,145 @@ shared actor class Collection(collectionOwner: Types.Account, init: Types.Collec
 
   private func _isBackfillKeyAllowed(k: Text): Bool {
     k == "spellName" or k == "jalca:spell_name" or k == "jalca:game_number"
+  };
+
+  // ==========================================
+  // Canister-assigned token ids (mint_auto / mint_auto_batch)
+  // ==========================================
+  private stable var nextTokenId: Nat = 0;
+
+  // Mint with a canister-assigned id. The backend no longer computes,
+  // guesses, or retries an id — it just gets one back. nextTokenId only
+  // ever increases and is never touched by burns, so it can't collide
+  // with anything currently held.
+  public shared({ caller }) func mint_auto(to: Types.Account, metadata: [(Text, Types.Metadata)]): async Types.MintReceipt {
+    let now = Nat64.fromIntWrap(Time.now());
+    let acceptedTo: Types.Account = _acceptAccount(to);
+
+    let isAuthorized = Principal.equal(caller, owner.owner) or _isAllowlistedAdmin(caller);
+    if (not isAuthorized) {
+      return #Err(#GenericError({
+        error_code = 401;
+        message = "Unauthorized caller: [" # Principal.toText(caller) # "].";
+      }));
+    };
+
+    if (supplyCap != null) {
+      let _supplyCap: Nat = Utils.nullishCoalescing<Nat>(supplyCap, 0);
+      if (totalSupply + 1 > _supplyCap) {
+        return #Err(#SupplyCapOverflow);
+      };
+    };
+
+    if (Principal.equal(acceptedTo.owner, NULL_PRINCIPAL)) {
+      return #Err(#InvalidRecipient);
+    };
+
+    let tokenId: Types.TokenId = nextTokenId;
+    nextTokenId := nextTokenId + 1;
+
+    let newToken : Types.TokenMetadata = {
+      tokenId = tokenId;
+      owner = acceptedTo;
+      metadata = metadata;
+    };
+
+    tokens := Trie.put(tokens, _keyFromTokenId tokenId, Nat.equal, newToken).0;
+    _addTokenToOwners(acceptedTo, tokenId);
+    _incrementBalance(acceptedTo);
+    _incrementTotalSupply(1);
+
+    let transaction: Types.Transaction = _addTransaction(#mint, now, ?[tokenId], ?acceptedTo, null, null, null, null, null);
+
+    return #Ok(tokenId);
+  };
+
+  // Batch mint with canister-assigned ids. Index-aligned: accounts[i] gets
+  // a token with metadata[i]. One MintReceipt per input, same order.
+  //
+  // Failure semantics: no whole-call rollback. Motoko only undoes state on
+  // an actual trap, not on a returned #Err -- so if item 3 of 10 fails
+  // validation, items 1-2 (and any after item 3 that pass) still mint and
+  // keep their token ids. Check every receipt in the returned vector
+  // individually; don't assume all-or-nothing.
+  //
+  // The only trap condition is a length mismatch between the two input
+  // vectors -- that's a caller bug, not a data condition, so it fails loud.
+  //
+  // Recommended batch size: 50 per call (unbenchmarked against the
+  // instruction limit; chunk client-side, raise once tested higher).
+  public shared({ caller }) func mint_auto_batch(
+    accounts: [Types.Account],
+    metadataList: [[(Text, Types.Metadata)]]
+  ): async [Types.MintReceipt] {
+    if (accounts.size() != metadataList.size()) {
+      Debug.trap("mint_auto_batch: accounts and metadata must be the same length (" # Nat.toText(accounts.size()) # " vs " # Nat.toText(metadataList.size()) # ")");
+    };
+
+    let isAuthorized = Principal.equal(caller, owner.owner) or _isAllowlistedAdmin(caller);
+    if (not isAuthorized) {
+      let err: Types.MintReceipt = #Err(#GenericError({
+        error_code = 401;
+        message = "Unauthorized caller: [" # Principal.toText(caller) # "].";
+      }));
+      return Array.tabulate<Types.MintReceipt>(accounts.size(), func (_i) = err);
+    };
+
+    let now = Nat64.fromIntWrap(Time.now());
+    let results = Buffer.Buffer<Types.MintReceipt>(accounts.size());
+
+    for (i in accounts.keys()) {
+      let acceptedTo: Types.Account = _acceptAccount(accounts[i]);
+      let metadata = metadataList[i];
+
+      if (supplyCap != null and totalSupply + 1 > Utils.nullishCoalescing<Nat>(supplyCap, 0)) {
+        results.add(#Err(#SupplyCapOverflow));
+      } else if (Principal.equal(acceptedTo.owner, NULL_PRINCIPAL)) {
+        results.add(#Err(#InvalidRecipient));
+      } else {
+        let tokenId: Types.TokenId = nextTokenId;
+        nextTokenId := nextTokenId + 1;
+
+        let newToken : Types.TokenMetadata = {
+          tokenId = tokenId;
+          owner = acceptedTo;
+          metadata = metadata;
+        };
+        tokens := Trie.put(tokens, _keyFromTokenId tokenId, Nat.equal, newToken).0;
+        _addTokenToOwners(acceptedTo, tokenId);
+        _incrementBalance(acceptedTo);
+        _incrementTotalSupply(1);
+        let _transaction = _addTransaction(#mint, now, ?[tokenId], ?acceptedTo, null, null, null, null, null);
+
+        results.add(#Ok(tokenId));
+      };
+    };
+
+    Buffer.toArray(results)
+  };
+
+  public shared query func icrc7_next_token_id(): async Nat {
+    return nextTokenId;
+  };
+
+  // REQUIRED ONE-TIME CALL after this upgrade, before any mint_auto call.
+  // Raises nextTokenId above (a) every token id currently held, and
+  // (b) a floor you supply, covering ids that were minted and later burned.
+  // Admin-only. Safe to call more than once — it only ever moves the
+  // counter up, never down.
+  public shared({ caller }) func sync_next_token_id(floor: Nat): async Nat {
+    if (not (Principal.equal(caller, owner.owner) or _isAllowlistedAdmin(caller))) {
+      return nextTokenId;
+    };
+    let all = Trie.toArray<Types.TokenId, Types.TokenMetadata, Types.TokenMetadata>(tokens, func (_k, v) = v);
+    var candidate: Nat = floor;
+    for (t in all.vals()) {
+      if (t.tokenId + 1 > candidate) { candidate := t.tokenId + 1 };
+    };
+    if (candidate > nextTokenId) {
+      nextTokenId := candidate;
+    };
+    return nextTokenId;
   };
 
   public func get_transactions(getTransactionsArgs: Types.GetTransactionsArgs): async Types.GetTransactionsResult {
